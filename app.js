@@ -45,6 +45,9 @@ const state = {
   isPinching: false,
   lastPinchAt: 0,
   isImmersive: false,
+  touchStartX: 0,
+  touchStartY: 0,
+  touchStartedAt: 0,
 };
 
 const canvasContext = elements.pdfCanvas.getContext("2d");
@@ -531,8 +534,8 @@ function wireEvents() {
   elements.restoreButton.addEventListener("click", restoreLastPdf);
   elements.previousButton.addEventListener("click", () => goToPage(state.currentPage - 1));
   elements.nextButton.addEventListener("click", () => goToPage(state.currentPage + 1));
-  elements.previousZone.addEventListener("click", () => handlePageTap(-1));
-  elements.nextZone.addEventListener("click", () => handlePageTap(1));
+  wireTapZone(elements.previousZone, -1);
+  wireTapZone(elements.nextZone, 1);
   elements.savePageTiming.addEventListener("click", saveTimingForCurrentPage);
   elements.clearPageTiming.addEventListener("click", clearTimingForCurrentPage);
   elements.defaultInterval.addEventListener("change", () => {
@@ -596,6 +599,40 @@ function handlePageTap(direction) {
   }
 
   goToPage(state.currentPage + direction);
+}
+
+function wireTapZone(zone, direction) {
+  zone.addEventListener("pointerdown", (event) => {
+    if (event.pointerType === "touch" && event.isPrimary === false) {
+      state.isPinching = true;
+      state.lastPinchAt = Date.now();
+      return;
+    }
+
+    state.touchStartX = event.clientX;
+    state.touchStartY = event.clientY;
+    state.touchStartedAt = Date.now();
+  });
+
+  zone.addEventListener("pointerup", (event) => {
+    if (event.pointerType === "touch" && event.isPrimary === false) {
+      return;
+    }
+
+    const movedX = Math.abs(event.clientX - state.touchStartX);
+    const movedY = Math.abs(event.clientY - state.touchStartY);
+    const elapsed = Date.now() - state.touchStartedAt;
+
+    if (movedX < 18 && movedY < 18 && elapsed < 800) {
+      handlePageTap(direction);
+    }
+  });
+
+  zone.addEventListener("click", (event) => {
+    if (event.pointerType === "mouse" || event.detail > 0) {
+      handlePageTap(direction);
+    }
+  });
 }
 
 loadDefaultInterval();
