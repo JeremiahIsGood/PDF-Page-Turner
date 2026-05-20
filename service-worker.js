@@ -1,4 +1,4 @@
-const CACHE_NAME = "pdf-page-turner-v1";
+const CACHE_NAME = "pdf-page-turner-v2";
 const LOCAL_ASSETS = [
   "./",
   "./index.html",

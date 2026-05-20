@@ -88,7 +88,8 @@ h1 {
 .secondary-button,
 .ghost-button,
 .file-button,
-.primary-file-button {
+.primary-file-button,
+.restore-button {
   min-height: 44px;
   border: 0;
   border-radius: 8px;
@@ -109,6 +110,7 @@ h1 {
   place-items: center;
   padding: 14px;
   overflow: hidden;
+  touch-action: pan-x pan-y pinch-zoom;
 }
 
 .pdf-canvas {
@@ -125,6 +127,7 @@ h1 {
   bottom: 0;
   z-index: 2;
   width: 38%;
+  touch-action: pan-x pan-y pinch-zoom;
 }
 
 .tap-zone-left {
@@ -189,6 +192,16 @@ input[type="file"] {
   padding: 0 22px;
   background: var(--accent);
   color: white;
+}
+
+.restore-button {
+  display: inline-grid;
+  place-items: center;
+  margin: 0 8px 10px 0;
+  padding: 0 18px;
+  border: 1px solid var(--line);
+  background: white;
+  color: var(--ink);
 }
 
 .controls {
@@ -293,7 +306,7 @@ input[type="file"] {
 }
 
 .auto-controls {
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
 }
 
 .primary-button {
@@ -361,7 +374,42 @@ input[type="file"] {
     grid-template-columns: 1fr;
   }
 
+  .ghost-button,
   .file-button {
     width: 100%;
   }
+}
+
+body.immersive-mode {
+  background: #111827;
+  overflow: hidden;
+}
+
+body.immersive-mode .app-shell {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+body.immersive-mode .topbar,
+body.immersive-mode .controls {
+  display: none;
+}
+
+body.immersive-mode .viewer-panel {
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-right)) max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
+}
+
+.immersive-exit {
+  position: fixed;
+  top: max(12px, env(safe-area-inset-top));
+  right: max(12px, env(safe-area-inset-right));
+  z-index: 10;
+  min-height: 42px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(17, 24, 39, 0.82);
+  color: white;
+  font-weight: 800;
 }

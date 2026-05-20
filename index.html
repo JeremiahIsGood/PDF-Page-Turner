@@ -34,6 +34,7 @@
           <div class="empty-mark">PDF</div>
           <h2>Import a PDF to begin</h2>
           <p>Tap the left or right side of the screen to turn pages.</p>
+          <button class="restore-button hidden" id="restoreButton" type="button">Restore Last PDF</button>
           <label class="primary-file-button">
             Import PDF
             <input id="fileInput" type="file" accept="application/pdf,.pdf" />
@@ -82,6 +83,7 @@
 
         <div class="auto-controls">
           <button class="primary-button" id="startPauseButton" type="button">Start Auto Turn</button>
+          <button class="ghost-button" id="fullscreenButton" type="button">Fullscreen</button>
           <label class="file-button">
             Change PDF
             <input id="secondaryFileInput" type="file" accept="application/pdf,.pdf" />

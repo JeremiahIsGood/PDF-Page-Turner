@@ -1,5 +1,10 @@
 const DEFAULT_INTERVAL_KEY = "pdf-page-turner-default-interval";
 const TIMINGS_KEY = "pdf-page-turner-page-timings";
+const LAST_PAGE_KEY = "pdf-page-turner-last-page";
+const DB_NAME = "pdf-page-turner";
+const DB_VERSION = 1;
+const FILE_STORE = "files";
+const LAST_FILE_ID = "last-pdf";
 const PDF_WORKER_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 
 const elements = {
@@ -20,6 +25,8 @@ const elements = {
   clearPageTiming: document.getElementById("clearPageTiming"),
   startPauseButton: document.getElementById("startPauseButton"),
   installButton: document.getElementById("installButton"),
+  restoreButton: document.getElementById("restoreButton"),
+  fullscreenButton: document.getElementById("fullscreenButton"),
 };
 
 const state = {
@@ -32,6 +39,12 @@ const state = {
   fileKey: null,
   pageTimings: {},
   deferredInstallPrompt: null,
+  resizeTimer: null,
+  lastLayoutWidth: 0,
+  lastLayoutHeight: 0,
+  isPinching: false,
+  lastPinchAt: 0,
+  isImmersive: false,
 };
 
 const canvasContext = elements.pdfCanvas.getContext("2d");
@@ -79,6 +92,88 @@ function loadTimingsFor(file) {
   state.pageTimings = allStoredTimings()[state.fileKey] || {};
 }
 
+function openDatabase() {
+  return new Promise((resolve, reject) => {
+    if (!("indexedDB" in window)) {
+      reject(new Error("IndexedDB is not available"));
+      return;
+    }
+
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(FILE_STORE)) {
+        db.createObjectStore(FILE_STORE, { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function storeRecord(record) {
+  const db = await openDatabase();
+  await new Promise((resolve, reject) => {
+    const transaction = db.transaction(FILE_STORE, "readwrite");
+    transaction.objectStore(FILE_STORE).put(record);
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error);
+  });
+  db.close();
+}
+
+async function readLastRecord() {
+  const db = await openDatabase();
+  const record = await new Promise((resolve, reject) => {
+    const transaction = db.transaction(FILE_STORE, "readonly");
+    const request = transaction.objectStore(FILE_STORE).get(LAST_FILE_ID);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  });
+  db.close();
+  return record;
+}
+
+async function saveLastPdf(file, data) {
+  try {
+    await storeRecord({
+      id: LAST_FILE_ID,
+      name: file.name,
+      size: file.size,
+      lastModified: file.lastModified,
+      data: data.slice(0),
+      page: state.currentPage,
+      savedAt: Date.now(),
+    });
+    await refreshRestoreButton();
+  } catch (error) {
+    console.warn("Could not save PDF for restore", error);
+  }
+}
+
+async function saveCurrentPagePosition() {
+  if (!state.pdf) {
+    return;
+  }
+
+  localStorage.setItem(LAST_PAGE_KEY, String(state.currentPage));
+}
+
+async function refreshRestoreButton() {
+  try {
+    const record = await readLastRecord();
+    if (!record) {
+      elements.restoreButton.classList.add("hidden");
+      return;
+    }
+
+    elements.restoreButton.textContent = `Restore ${record.name}`;
+    elements.restoreButton.classList.remove("hidden");
+  } catch {
+    elements.restoreButton.classList.add("hidden");
+  }
+}
+
 async function importPdf(file) {
   if (!file) {
     return;
@@ -93,13 +188,43 @@ async function importPdf(file) {
   try {
     await waitForPdfJs();
     const data = await file.arrayBuffer();
-    state.pdf = await pdfjsLib.getDocument({ data }).promise;
+    state.pdf = await pdfjsLib.getDocument({ data: data.slice(0) }).promise;
     state.currentPage = 1;
     state.totalPages = state.pdf.numPages;
+    localStorage.setItem(LAST_PAGE_KEY, "1");
+    await saveLastPdf(file, data);
     await renderPage();
   } catch (error) {
     console.error(error);
     resetViewer("Could not load this PDF");
+  } finally {
+    setLoading(false);
+  }
+}
+
+async function restoreLastPdf() {
+  stopAutoTurn();
+  setLoading(true);
+  elements.emptyState.classList.add("hidden");
+
+  try {
+    const record = await readLastRecord();
+    if (!record?.data) {
+      resetViewer("No saved PDF found");
+      return;
+    }
+
+    await waitForPdfJs();
+    elements.documentName.textContent = record.name;
+    loadTimingsFor(record);
+    state.pdf = await pdfjsLib.getDocument({ data: record.data.slice(0) }).promise;
+    state.totalPages = state.pdf.numPages;
+    const savedPage = Number(localStorage.getItem(LAST_PAGE_KEY)) || record.page || 1;
+    state.currentPage = Math.min(Math.max(savedPage, 1), state.totalPages);
+    await renderPage();
+  } catch (error) {
+    console.error(error);
+    resetViewer("Could not restore the last PDF");
   } finally {
     setLoading(false);
   }
@@ -157,6 +282,8 @@ async function renderPage() {
   const container = document.querySelector(".viewer-panel");
   const availableWidth = Math.max(300, container.clientWidth - 28);
   const availableHeight = Math.max(280, container.clientHeight - 28);
+  state.lastLayoutWidth = container.clientWidth;
+  state.lastLayoutHeight = container.clientHeight;
   const baseViewport = page.getViewport({ scale: 1 });
   const displayScale = Math.min(availableWidth / baseViewport.width, availableHeight / baseViewport.height);
   const outputScale = Math.min(window.devicePixelRatio || 1, 2);
@@ -209,10 +336,29 @@ async function goToPage(pageNumber) {
 
   state.currentPage = nextPage;
   await renderPage();
+  saveCurrentPagePosition();
 
   if (state.isAutoRunning) {
     scheduleAutoTurn();
   }
+}
+
+function scheduleResponsiveRender() {
+  if (!state.pdf) {
+    return;
+  }
+
+  const container = document.querySelector(".viewer-panel");
+  const widthChanged = Math.abs(container.clientWidth - state.lastLayoutWidth) > 12;
+  const heightChanged = Math.abs(container.clientHeight - state.lastLayoutHeight) > 12;
+  const recentlyPinched = Date.now() - state.lastPinchAt < 500;
+
+  if ((!widthChanged && !heightChanged) || state.isPinching || recentlyPinched) {
+    return;
+  }
+
+  window.clearTimeout(state.resizeTimer);
+  state.resizeTimer = window.setTimeout(() => renderPage(), 250);
 }
 
 function currentInterval() {
@@ -288,6 +434,91 @@ function clearTimingForCurrentPage() {
   }
 }
 
+async function enterFullscreen() {
+  const shell = document.querySelector(".app-shell");
+
+  try {
+    if (shell.requestFullscreen) {
+      await shell.requestFullscreen();
+    } else if (shell.webkitRequestFullscreen) {
+      shell.webkitRequestFullscreen();
+    } else {
+      enterImmersiveMode();
+    }
+  } catch {
+    enterImmersiveMode();
+  }
+
+  if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+    enterImmersiveMode();
+  }
+}
+
+async function exitFullscreen() {
+  if (document.fullscreenElement && document.exitFullscreen) {
+    await document.exitFullscreen();
+    return;
+  }
+
+  if (document.webkitFullscreenElement && document.webkitExitFullscreen) {
+    document.webkitExitFullscreen();
+    return;
+  }
+
+  exitImmersiveMode();
+}
+
+function enterImmersiveMode() {
+  if (state.isImmersive) {
+    return;
+  }
+
+  state.isImmersive = true;
+  document.body.classList.add("immersive-mode");
+  elements.fullscreenButton.textContent = "Exit Fullscreen";
+  ensureImmersiveExitButton();
+
+  window.setTimeout(() => renderPage(), 80);
+}
+
+function exitImmersiveMode() {
+  state.isImmersive = false;
+  document.body.classList.remove("immersive-mode");
+  elements.fullscreenButton.textContent = "Fullscreen";
+  document.getElementById("immersiveExitButton")?.remove();
+  window.setTimeout(() => renderPage(), 80);
+}
+
+function ensureImmersiveExitButton() {
+  if (document.getElementById("immersiveExitButton")) {
+    return;
+  }
+
+  const exitButton = document.createElement("button");
+  exitButton.className = "immersive-exit";
+  exitButton.id = "immersiveExitButton";
+  exitButton.type = "button";
+  exitButton.textContent = "Exit";
+  exitButton.addEventListener("click", exitFullscreen);
+  document.body.appendChild(exitButton);
+}
+
+function syncFullscreenState() {
+  const isNativeFullscreen = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
+  if (isNativeFullscreen) {
+    state.isImmersive = false;
+    document.body.classList.add("immersive-mode");
+    elements.fullscreenButton.textContent = "Exit Fullscreen";
+    ensureImmersiveExitButton();
+  } else if (!state.isImmersive) {
+    document.body.classList.remove("immersive-mode");
+    elements.fullscreenButton.textContent = "Fullscreen";
+    document.getElementById("immersiveExitButton")?.remove();
+  }
+
+  window.setTimeout(() => renderPage(), 80);
+}
+
 function registerServiceWorker() {
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("service-worker.js").catch(console.error);
@@ -297,10 +528,11 @@ function registerServiceWorker() {
 function wireEvents() {
   elements.fileInput.addEventListener("change", (event) => importPdf(event.target.files[0]));
   elements.secondaryFileInput.addEventListener("change", (event) => importPdf(event.target.files[0]));
+  elements.restoreButton.addEventListener("click", restoreLastPdf);
   elements.previousButton.addEventListener("click", () => goToPage(state.currentPage - 1));
   elements.nextButton.addEventListener("click", () => goToPage(state.currentPage + 1));
-  elements.previousZone.addEventListener("click", () => goToPage(state.currentPage - 1));
-  elements.nextZone.addEventListener("click", () => goToPage(state.currentPage + 1));
+  elements.previousZone.addEventListener("click", () => handlePageTap(-1));
+  elements.nextZone.addEventListener("click", () => handlePageTap(1));
   elements.savePageTiming.addEventListener("click", saveTimingForCurrentPage);
   elements.clearPageTiming.addEventListener("click", clearTimingForCurrentPage);
   elements.defaultInterval.addEventListener("change", () => {
@@ -316,7 +548,31 @@ function wireEvents() {
       startAutoTurn();
     }
   });
-  window.addEventListener("resize", () => renderPage());
+  elements.fullscreenButton.addEventListener("click", () => {
+    if (document.fullscreenElement || document.webkitFullscreenElement || state.isImmersive) {
+      exitFullscreen();
+    } else {
+      enterFullscreen();
+    }
+  });
+  window.addEventListener("resize", scheduleResponsiveRender);
+  window.visualViewport?.addEventListener("resize", scheduleResponsiveRender);
+  document.addEventListener("fullscreenchange", syncFullscreenState);
+  document.addEventListener("webkitfullscreenchange", syncFullscreenState);
+  document.addEventListener("touchstart", (event) => {
+    if (event.touches.length > 1) {
+      state.isPinching = true;
+      state.lastPinchAt = Date.now();
+    }
+  }, { passive: true });
+  document.addEventListener("touchend", (event) => {
+    if (event.touches.length < 2) {
+      state.lastPinchAt = Date.now();
+      window.setTimeout(() => {
+        state.isPinching = false;
+      }, 350);
+    }
+  }, { passive: true });
   window.addEventListener("beforeinstallprompt", (event) => {
     event.preventDefault();
     state.deferredInstallPrompt = event;
@@ -334,7 +590,16 @@ function wireEvents() {
   });
 }
 
+function handlePageTap(direction) {
+  if (state.isPinching || Date.now() - state.lastPinchAt < 450) {
+    return;
+  }
+
+  goToPage(state.currentPage + direction);
+}
+
 loadDefaultInterval();
 wireEvents();
 registerServiceWorker();
 updatePageStatus();
+refreshRestoreButton();
